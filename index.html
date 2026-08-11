@@ -312,6 +312,19 @@ table.data-table{width:100%;border-collapse:collapse;font-size:13px;}
 .meta-hero .bar-block{flex:1;min-width:220px;}
 .meta-toolbar{display:flex;gap:8px;align-items:center;}
 
+/* In-tab compact upload (Mídia Paga) */
+.inline-upload{
+  border:1.5px dashed var(--border);border-radius:var(--radius-md);
+  padding:36px 24px;text-align:center;background:var(--purple-50);
+  display:flex;flex-direction:column;align-items:center;gap:10px;cursor:pointer;
+  transition:all .15s ease;max-width:520px;margin:20px auto;
+}
+.inline-upload:hover{border-color:var(--purple-500);background:var(--purple-100);}
+.inline-upload.is-over{border-color:var(--purple);background:var(--purple-100);}
+.inline-upload .dz-icon{width:38px;height:38px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-sm);font-size:17px;color:var(--purple);}
+.inline-upload .dz-title{font-size:14px;font-weight:750;color:var(--text-1);}
+.inline-upload .dz-sub{font-size:12.5px;color:var(--text-2);line-height:1.5;}
+
 .empty-state{padding:40px 20px;text-align:center;color:var(--text-3);font-size:13px;}
 
 .published-banner{
@@ -432,6 +445,7 @@ table.data-table{width:100%;border-collapse:collapse;font-size:13px;}
     <div class="tab-panel" id="panel-familia"></div>
     <div class="tab-panel" id="panel-cancelamento"></div>
     <div class="tab-panel" id="panel-metas"></div>
+    <div class="tab-panel" id="panel-midia"></div>
     <div class="tab-panel" id="panel-comparativos"></div>
   </div>
 </div>
@@ -1186,6 +1200,121 @@ function metaStatus(actual, target) {
   return { level: 'below', pct: p };
 }
 
+// ===================== MÍDIA PAGA (Meta Ads export) =====================
+// Meta Ads exports are hierarchical: the same spend appears in a campaign-level rollup row,
+// an adset-level rollup row, an ad-level rollup row, AND ad-level rows broken down by day/age/
+// gender. Summing rows naively double- or triple-counts spend. The only rows that are safe to
+// sum without double-counting are the most atomic ones: "Nível de veiculação" = ad AND "Dia" is
+// a specific date (not "All") — every other rollup is mathematically derivable from these by
+// grouping, so we ignore every other row entirely.
+const MEDIA_FIELD_ALIASES = {
+  campanha: ['NOME DA CAMPANHA'],
+  conjunto: ['NOME DO CONJUNTO DE ANUNCIOS'],
+  anuncio: ['NOME DO ANUNCIO'],
+  idade: ['IDADE'],
+  genero: ['GENERO'],
+  dia: ['DIA'],
+  nivel: ['NIVEL DE VEICULACAO'],
+  statusVeiculacao: ['STATUS DE VEICULACAO'],
+  alcance: ['ALCANCE'],
+  impressoes: ['IMPRESSOES'],
+  tipoResultado: ['TIPO DE RESULTADO'],
+  resultados: ['RESULTADOS'],
+  gasto: ['VALOR GASTO'],
+  cliques: ['CLIQUES NO LINK'],
+  objetivo: ['OBJETIVO']
+};
+
+function findColIndex(header, aliases) {
+  const norm = header.map(normalizeHeader);
+  for (const alias of aliases) {
+    const idx = norm.findIndex(h => h.indexOf(alias) === 0 || h === alias);
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+function findMediaHeaderRow(rows) {
+  for (let i = 0; i < Math.min(rows.length, 10); i++) {
+    const norm = (rows[i] || []).map(normalizeHeader);
+    if (norm.some(h => h.indexOf('NOME DA CAMPANHA') === 0)) return i;
+  }
+  return -1;
+}
+
+function parseMediaRows(rows) {
+  const headerIdx = findMediaHeaderRow(rows);
+  if (headerIdx === -1) return [];
+  const header = rows[headerIdx];
+  const map = {};
+  for (const field in MEDIA_FIELD_ALIASES) map[field] = findColIndex(header, MEDIA_FIELD_ALIASES[field]);
+  if (map.nivel === -1 || map.dia === -1 || map.gasto === -1) return [];
+
+  const out = [];
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r[map.campanha]) continue;
+    if (normalizeHeader(r[map.nivel]) !== 'AD') continue;
+    const diaRaw = r[map.dia];
+    if (!diaRaw || normalizeHeader(diaRaw) === 'ALL') continue;
+    const dia = toDate(diaRaw);
+    if (!dia) continue;
+    out.push({
+      campanha: r[map.campanha] || '(sem nome)',
+      conjunto: map.conjunto !== -1 ? (r[map.conjunto] || '(sem nome)') : '(sem nome)',
+      anuncio: map.anuncio !== -1 ? (r[map.anuncio] || '(sem nome)') : '(sem nome)',
+      idade: map.idade !== -1 ? (r[map.idade] || 'Não informado') : 'Não informado',
+      genero: map.genero !== -1 ? (r[map.genero] || 'Não informado') : 'Não informado',
+      dia,
+      statusVeiculacao: map.statusVeiculacao !== -1 ? r[map.statusVeiculacao] : null,
+      alcance: numOr0(r[map.alcance]),
+      impressoes: numOr0(r[map.impressoes]),
+      resultados: numOr0(r[map.resultados]),
+      gasto: numOr0(r[map.gasto]),
+      cliques: numOr0(r[map.cliques]),
+      tipoResultado: map.tipoResultado !== -1 ? r[map.tipoResultado] : null,
+      objetivo: map.objetivo !== -1 ? r[map.objetivo] : null
+    });
+  }
+  return out;
+}
+
+function numOr0(v) { const n = Number(v); return isNaN(n) ? 0 : n; }
+
+function safeDiv(a, b) { return b > 0 ? a / b : null; }
+
+function mediaAggregate(records) {
+  const gasto = sum(records.map(r => r.gasto));
+  const resultados = sum(records.map(r => r.resultados));
+  const cliques = sum(records.map(r => r.cliques));
+  const impressoes = sum(records.map(r => r.impressoes));
+  const alcance = sum(records.map(r => r.alcance));
+  return {
+    gasto, resultados, cliques, impressoes, alcance,
+    cac: safeDiv(gasto, resultados),
+    cpc: safeDiv(gasto, cliques),
+    cpm: impressoes > 0 ? (gasto / impressoes) * 1000 : null,
+    ctr: impressoes > 0 ? cliques / impressoes : null
+  };
+}
+
+function mediaGroupBy(records, keyFn) {
+  const groups = new Map();
+  for (const r of records) {
+    const k = keyFn(r);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  const out = [];
+  for (const [k, recs] of groups) out.push(Object.assign({ key: k }, mediaAggregate(recs)));
+  return out;
+}
+
+function mediaDailySeries(records) {
+  const byDay = mediaGroupBy(records, r => monthKeyUTC ? (r.dia.getFullYear()+'-'+String(r.dia.getMonth()+1).padStart(2,'0')+'-'+String(r.dia.getDate()).padStart(2,'0')) : r.dia.toISOString().slice(0,10));
+  return byDay.sort((a, b) => a.key < b.key ? -1 : 1);
+}
+
 
   return {
     normalizeHeader, normalizeCpf, monthKeyFromHeader, toDate, daysBetween, avg, sum, pct,
@@ -1197,7 +1326,8 @@ function metaStatus(actual, target) {
     computeProfile, computeClubeSection, computeFamiliaSection,
     inRange, asOfStatus, familiaActivationDate, computeOverviewAggregate, computeFunnel,
     computeComparativoGroup, classifyGenerationByYear, resolveAgeAndGeneration, MAX_PLAUSIBLE_AGE,
-    computeCancelamentoSection, monthRange, monthLabel, computeMetasTable, metaStatus
+    computeCancelamentoSection, monthRange, monthLabel, computeMetasTable, metaStatus,
+    parseMediaRows, mediaAggregate, mediaGroupBy, mediaDailySeries
   };
 })();
 
@@ -1219,6 +1349,9 @@ const AppState = {
   hasGzhGeral: false,
   generalVoucherCounts: null,
   metas: {},
+  mediaRecords: [],
+  hasMedia: false,
+  mediaFilters: { dateFrom:null, dateTo:null, campanhas:new Set() },
   exportedAt: null,
   charts: {},
   workbooks: { main:null, clube:null, vouchers:null, gzhgeral:null },
@@ -1466,6 +1599,17 @@ function deserializeGzhGeralSub(o){
 function serializeFamiliaRec(rec){ return { status:rec.status, dataAssinatura: rec.dataAssinatura ? rec.dataAssinatura.toISOString() : null, months: rec.months }; }
 function deserializeFamiliaRec(o){ return { status:o.status, dataAssinatura: o.dataAssinatura ? new Date(o.dataAssinatura) : null, months: o.months }; }
 
+function serializeMediaRecord(r){
+  return { campanha:r.campanha, conjunto:r.conjunto, anuncio:r.anuncio, idade:r.idade, genero:r.genero,
+    dia: r.dia ? r.dia.toISOString() : null, alcance:r.alcance, impressoes:r.impressoes,
+    resultados:r.resultados, gasto:r.gasto, cliques:r.cliques };
+}
+function deserializeMediaRecord(o){
+  return { campanha:o.campanha, conjunto:o.conjunto, anuncio:o.anuncio, idade:o.idade, genero:o.genero,
+    dia: o.dia ? new Date(o.dia) : null, alcance:o.alcance, impressoes:o.impressoes,
+    resultados:o.resultados, gasto:o.gasto, cliques:o.cliques };
+}
+
 function serializeAppState(){
   // Full event-level detail is only kept for the Petlove cohort (small, tens to low hundreds of events).
   // For the broader GZH population (used only for aggregate comparatives), we ship a compact
@@ -1492,7 +1636,9 @@ function serializeAppState(){
     generalVoucherCounts,
     gzhGeral: AppState.gzhGeralSubs.map(serializeGzhGeralSub),
     hasGzhGeral: AppState.hasGzhGeral,
-    metas: AppState.metas
+    metas: AppState.metas,
+    mediaRecords: AppState.mediaRecords.map(serializeMediaRecord),
+    hasMedia: AppState.hasMedia
   };
 }
 
@@ -1508,6 +1654,19 @@ function loadFromPreloadedData(payload){
   AppState.voucherByCpf = voucherByCpf;
   AppState.generalVoucherCounts = payload.generalVoucherCounts || null;
   AppState.metas = payload.metas || {};
+
+  if(payload.mediaRecords && payload.mediaRecords.length){
+    const media = payload.mediaRecords.map(deserializeMediaRecord);
+    AppState.mediaRecords = media;
+    AppState.hasMedia = true;
+    const mdates = media.map(r => r.dia);
+    AppState.mediaFilters.dateFrom = new Date(Math.min.apply(null, mdates));
+    AppState.mediaFilters.dateTo = new Date(Math.max.apply(null, mdates));
+    AppState.mediaFilters.campanhas = new Set(media.map(r => r.campanha));
+  } else {
+    AppState.mediaRecords = [];
+    AppState.hasMedia = false;
+  }
   AppState.hasCidade = subs.some(s => s.cidade);
   AppState.exportedAt = payload.exportedAt ? new Date(payload.exportedAt) : null;
 
@@ -1588,11 +1747,43 @@ function importMetasFromFile(file, callback){
   reader.readAsText(file);
 }
 
+/* ===================== MÍDIA PAGA UPLOAD ===================== */
+async function handleMediaFile(file, onDone){
+  if(!file) return;
+  try{
+    const wb = await readFileAsWorkbook(file);
+    const sheetName = findSheet(wb, ['RAW']) || wb.SheetNames[wb.SheetNames.length - 1];
+    const rows = sheetRows(wb, sheetName);
+    const records = Logic.parseMediaRows(rows);
+    if(!records.length) throw new Error('Nenhuma linha reconhecida. Verifique se é um export do Meta Ads (aba "Raw Data Report").');
+    AppState.mediaRecords = records;
+    AppState.hasMedia = true;
+    const dates = records.map(r => r.dia);
+    AppState.mediaFilters.dateFrom = new Date(Math.min.apply(null, dates));
+    AppState.mediaFilters.dateTo = new Date(Math.max.apply(null, dates));
+    AppState.mediaFilters.campanhas = new Set(records.map(r => r.campanha));
+    onDone && onDone(null, records.length);
+  }catch(err){
+    onDone && onDone(err);
+  }
+}
+
+function getFilteredMediaRecords(){
+  const f = AppState.mediaFilters;
+  return AppState.mediaRecords.filter(r => {
+    if(f.dateFrom && r.dia < f.dateFrom) return false;
+    if(f.dateTo){ const end = new Date(f.dateTo.getTime()); end.setHours(23,59,59,999); if(r.dia > end) return false; }
+    if(f.campanhas.size && !f.campanhas.has(r.campanha)) return false;
+    return true;
+  });
+}
+
 window.__App = { AppState, fmtInt, fmtPct, fmtDays, fmtDate, esc, upsertChart, baseChartOptions,
   PALETTE, STATUS_ORDER, STATUS_LABELS, STATUS_CLASS, REF_DATE, titleCase, fmtDateInput,
   setupDropzones, buildDataModel, getFilteredSubscribers,
   loadFromPreloadedData, downloadPublishableHtml, buildPublishableHtml, serializeAppState,
-  downloadMetasJson, importMetasFromFile };
+  downloadMetasJson, importMetasFromFile,
+  handleMediaFile, getFilteredMediaRecords };
 })();
 
 (function(){
@@ -1609,6 +1800,7 @@ const TABS = [
   { id:'familia', label:'Plano Família' },
   { id:'cancelamento', label:'Cancelamento' },
   { id:'metas', label:'Metas' },
+  { id:'midia', label:'Mídia Paga' },
   { id:'comparativos', label:'Comparativos' }
 ];
 
@@ -2406,6 +2598,240 @@ function metaBadgeHTML(level){
 }
 
 /* ============================================================
+   MÍDIA PAGA
+   ============================================================ */
+function renderMidia(){
+  const el = document.getElementById('panel-midia');
+
+  if(!AppState.hasMedia){
+    el.innerHTML =
+      '<h2 class="section-title">Mídia Paga</h2>' +
+      '<p class="section-sub">Investimento, CAC, cliques e desempenho de campanhas — a partir do export do Meta Ads (Gerenciador de Anúncios).</p>' +
+      '<div class="inline-upload" id="mediaDropzone">' +
+        '<div class="dz-icon">↥</div>' +
+        '<div class="dz-title">Envie o relatório de mídia paga</div>' +
+        '<div class="dz-sub">Export do Meta Ads (aba "Raw Data Report" ou equivalente), .xlsx</div>' +
+        '<div class="dz-sub" id="mediaDzStatus" style="font-weight:700;"></div>' +
+        '<input type="file" class="dz-file-input" id="mediaFileInput" accept=".xlsx,.xls">' +
+      '</div>';
+    const dz = document.getElementById('mediaDropzone');
+    const input = document.getElementById('mediaFileInput');
+    dz.addEventListener('click', () => input.click());
+    input.addEventListener('change', (e) => handleMediaUpload(e.target.files[0]));
+    dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('is-over'); });
+    dz.addEventListener('dragleave', () => dz.classList.remove('is-over'));
+    dz.addEventListener('drop', (e) => {
+      e.preventDefault(); dz.classList.remove('is-over');
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      if(file) handleMediaUpload(file);
+    });
+    return;
+  }
+
+  renderMidiaDashboard();
+}
+
+function handleMediaUpload(file){
+  if(!file) return;
+  const statusEl = document.getElementById('mediaDzStatus');
+  if(statusEl) statusEl.textContent = 'Lendo arquivo…';
+  A.handleMediaFile(file, (err, count) => {
+    if(err){
+      if(statusEl){ statusEl.textContent = 'Erro: ' + err.message; statusEl.style.color = 'var(--red)'; }
+      return;
+    }
+    renderMidia();
+  });
+}
+
+function renderMidiaDashboard(){
+  const el = document.getElementById('panel-midia');
+  const f = AppState.mediaFilters;
+  const records = A.getFilteredMediaRecords();
+  const agg = L.mediaAggregate(records);
+
+  const campanhasAll = [...new Set(AppState.mediaRecords.map(r => r.campanha))].sort();
+
+  el.innerHTML =
+    '<h2 class="section-title">Mídia Paga</h2>' +
+    '<p class="section-sub">Investimento, CAC, cliques e desempenho de campanhas — dados do Meta Ads, independentes da base de assinantes.</p>' +
+
+    '<div class="filterbar" style="position:static;border:1px solid var(--border);border-radius:var(--radius-md);margin-bottom:20px;">' +
+      '<div class="filterbar-inner" style="padding:12px 16px;" id="mediaFilterBar"></div>' +
+    '</div>' +
+
+    '<div class="kpi-grid">' +
+      kpiCardHTML({label:'Investimento total', value:fmtBRL(agg.gasto), foot:'no período filtrado', cls:'c-black'}) +
+      kpiCardHTML({label:'Resultados (compras no site)', value:A.fmtInt(agg.resultados), foot:'conversões atribuídas pelo Meta', cls:'c-green'}) +
+      kpiCardHTML({label:'CAC médio', value:agg.cac===null?'—':fmtBRL(agg.cac), foot:'investimento / resultados', cls:''}) +
+      kpiCardHTML({label:'Cliques no link', value:A.fmtInt(agg.cliques), foot:'', cls:''}) +
+      kpiCardHTML({label:'CPC médio', value:agg.cpc===null?'—':fmtBRL(agg.cpc), foot:'custo por clique no link', cls:''}) +
+      kpiCardHTML({label:'CTR médio', value:agg.ctr===null?'—':A.fmtPct(agg.ctr,2), foot:'cliques / impressões', cls:''}) +
+      kpiCardHTML({label:'CPM médio', value:agg.cpm===null?'—':fmtBRL(agg.cpm), foot:'custo por 1.000 impressões', cls:''}) +
+      kpiCardHTML({label:'Impressões', value:A.fmtInt(agg.impressoes), foot:'', cls:''}) +
+    '</div>' +
+
+    '<div class="card"><div class="card-head"><span class="card-title">Investimento e resultados por dia</span></div>' +
+    '<div class="chart-box" style="height:300px"><canvas id="chartMidiaDiario"></canvas></div></div>' +
+
+    '<div class="grid-2b">' +
+      '<div class="card"><div class="card-head"><span class="card-title">Investimento por campanha</span></div>' +
+      '<div class="chart-box" style="height:260px"><canvas id="chartMidiaCampanha"></canvas></div></div>' +
+      '<div class="card"><div class="card-head"><span class="card-title">Investimento por idade</span></div>' +
+      '<div class="chart-box" style="height:260px"><canvas id="chartMidiaIdade"></canvas></div></div>' +
+    '</div>' +
+    '<div class="card"><div class="card-head"><span class="card-title">Investimento por gênero</span></div>' +
+    '<div class="chart-box" style="height:220px;max-width:420px;margin:0 auto;"><canvas id="chartMidiaGenero"></canvas></div></div>' +
+
+    '<div class="card"><div class="card-head"><span class="card-title">Desempenho por campanha</span></div>' +
+    mediaTableHTML(L.mediaGroupBy(records, r => r.campanha)) + '</div>' +
+
+    '<div class="card"><div class="card-head"><span class="card-title">Desempenho por conjunto de anúncios</span></div>' +
+    mediaTableHTML(L.mediaGroupBy(records, r => r.campanha + ' — ' + r.conjunto)) + '</div>' +
+
+    '<div class="card"><div class="card-head"><span class="card-title">Desempenho por anúncio</span></div>' +
+    mediaTableHTML(L.mediaGroupBy(records, r => r.anuncio)) + '</div>' +
+
+    '<p class="footnote">Metodologia: para evitar contar o mesmo investimento mais de uma vez (o export do Meta traz o mesmo gasto agregado em vários níveis — campanha, conjunto, anúncio, por dia, por idade/gênero), somamos apenas as linhas mais granulares (anúncio × dia × idade × gênero) e derivamos todo o resto a partir delas. "Alcance" é a soma do alcance diário e pode ter sobreposição entre dias/anúncios (a mesma pessoa pode ter sido alcançada mais de uma vez) — trate como direcional, não como número de pessoas únicas. "Resultados" é a conversão que o Meta atribui à campanha (compras no site) e pode não bater exatamente com "Vendas" da base de assinantes, por diferenças de janela de atribuição.</p>' +
+
+    '<div style="margin-top:16px;"><button class="btn btn-outline btn-sm" id="btnTrocarMidia">Trocar planilha de mídia</button></div>';
+
+  renderMediaFilterBar(campanhasAll);
+  renderMidiaCharts(records);
+
+  document.getElementById('btnTrocarMidia').addEventListener('click', () => {
+    AppState.hasMedia = false;
+    AppState.mediaRecords = [];
+    renderMidia();
+  });
+}
+
+function fmtBRL(v){
+  if(v===null||v===undefined||isNaN(v)) return '—';
+  return 'R$ ' + v.toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+function mediaTableHTML(groups){
+  const sorted = groups.slice().sort((a,b) => b.gasto - a.gasto).slice(0, 20);
+  const rows = sorted.map(g => '<tr>' +
+    '<td>'+A.esc(g.key)+'</td>' +
+    '<td class="num">'+fmtBRL(g.gasto)+'</td>' +
+    '<td class="num">'+A.fmtInt(g.resultados)+'</td>' +
+    '<td class="num">'+(g.cac===null?'—':fmtBRL(g.cac))+'</td>' +
+    '<td class="num">'+A.fmtInt(g.cliques)+'</td>' +
+    '<td class="num">'+(g.cpc===null?'—':fmtBRL(g.cpc))+'</td>' +
+    '<td class="num">'+(g.ctr===null?'—':A.fmtPct(g.ctr,2))+'</td>' +
+  '</tr>').join('');
+  return '<div class="tbl-scroll"><table class="data-table"><thead><tr>' +
+    '<th>Nome</th><th class="num">Investimento</th><th class="num">Resultados</th><th class="num">CAC</th>' +
+    '<th class="num">Cliques</th><th class="num">CPC</th><th class="num">CTR</th>' +
+    '</tr></thead><tbody>'+(rows || '<tr><td colspan="7" class="empty-state">Sem dados no filtro atual</td></tr>')+'</tbody></table></div>';
+}
+
+function renderMediaFilterBar(campanhasAll){
+  const f = AppState.mediaFilters;
+  const bar = document.getElementById('mediaFilterBar');
+  bar.innerHTML =
+    '<div class="filter-group">' +
+      '<span class="filter-label">Período de</span>' +
+      '<input type="date" class="filter-input" id="mediaDateFrom" value="'+A.fmtDateInput(f.dateFrom)+'">' +
+      '<span class="filter-label">até</span>' +
+      '<input type="date" class="filter-input" id="mediaDateTo" value="'+A.fmtDateInput(f.dateTo)+'">' +
+    '</div>' +
+    multiselectHTMLLocal('msCampanha', 'Campanha', campanhasAll, f.campanhas) +
+    '<div class="filter-spacer"></div>' +
+    '<span class="filter-count" id="mediaFilterCount"><b>'+A.getFilteredMediaRecords().length.toLocaleString('pt-BR')+'</b> linhas no filtro</span>';
+
+  document.getElementById('mediaDateFrom').addEventListener('change', (e) => {
+    f.dateFrom = e.target.value ? new Date(e.target.value+'T00:00:00') : null;
+    renderMidiaDashboard();
+  });
+  document.getElementById('mediaDateTo').addEventListener('change', (e) => {
+    f.dateTo = e.target.value ? new Date(e.target.value+'T00:00:00') : null;
+    renderMidiaDashboard();
+  });
+  bar.querySelectorAll('.multiselect-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const panel = btn.closest('.multiselect');
+      const wasOpen = panel.classList.contains('open');
+      bar.querySelectorAll('.multiselect').forEach(m => m.classList.remove('open'));
+      if(!wasOpen) panel.classList.add('open');
+    });
+  });
+  document.addEventListener('click', () => bar.querySelectorAll('.multiselect').forEach(m => m.classList.remove('open')));
+  const msCampanha = bar.querySelector('#msCampanha');
+  if(msCampanha){
+    msCampanha.addEventListener('change', (e) => {
+      if(e.target.type !== 'checkbox') return;
+      const checked = [...msCampanha.querySelectorAll('input:checked')].map(i => i.value);
+      f.campanhas = new Set(checked);
+      renderMidiaDashboard();
+    });
+  }
+}
+
+function multiselectHTMLLocal(id, label, options, selectedSet){
+  const allSelected = selectedSet.size === options.length;
+  const summary = allSelected ? 'Todas' : (selectedSet.size + ' de ' + options.length);
+  const opts = options.map(o => {
+    const checked = selectedSet.has(o) ? 'checked' : '';
+    return '<label class="ms-option"><input type="checkbox" value="'+A.esc(o)+'" '+checked+'> '+A.esc(o)+'</label>';
+  }).join('');
+  return '<div class="filter-group multiselect" id="'+id+'">' +
+    '<span class="filter-label">'+label+'</span>' +
+    '<button type="button" class="multiselect-btn" data-toggle="'+id+'"><span>'+summary+'</span> ▾</button>' +
+    '<div class="multiselect-panel">'+opts+'</div>' +
+  '</div>';
+}
+
+function renderMidiaCharts(records){
+  const daily = L.mediaDailySeries(records);
+  A.upsertChart('chartMidiaDiario', {
+    type:'bar',
+    data:{
+      labels: daily.map(d => { const [y,m,dd] = d.key.split('-'); return dd+'/'+m; }),
+      datasets:[
+        { type:'bar', label:'Investimento (R$)', data: daily.map(d=>Number(d.gasto.toFixed(2))), backgroundColor:'#502096', borderRadius:3, yAxisID:'y' },
+        { type:'line', label:'Resultados', data: daily.map(d=>d.resultados), borderColor:'#1a8f5c', backgroundColor:'#1a8f5c', tension:.3, pointRadius:2, yAxisID:'y1' }
+      ]
+    },
+    options: A.baseChartOptions({
+      scales:{
+        y:{ beginAtZero:true, position:'left', title:{display:true,text:'R$'} },
+        y1:{ beginAtZero:true, position:'right', grid:{drawOnChartArea:false}, title:{display:true,text:'Resultados'}, ticks:{precision:0} },
+        x:{ ticks:{ maxTicksLimit:16 } }
+      }
+    })
+  });
+
+  const byCampanha = L.mediaGroupBy(records, r => r.campanha).sort((a,b)=>b.gasto-a.gasto);
+  A.upsertChart('chartMidiaCampanha', {
+    type:'bar',
+    data:{ labels: byCampanha.map(c=>c.key), datasets:[{ label:'Investimento', data: byCampanha.map(c=>Number(c.gasto.toFixed(2))), backgroundColor:'#502096', borderRadius:6, maxBarThickness:44 }] },
+    options: A.baseChartOptions({ plugins:{legend:{display:false}}, scales:{ y:{ beginAtZero:true } } })
+  });
+
+  const ageOrder = ['18-24','25-34','35-44','45-54','55-64','65+'];
+  const byIdade = L.mediaGroupBy(records, r => r.idade).sort((a,b) => {
+    const ia = ageOrder.indexOf(a.key), ib = ageOrder.indexOf(b.key);
+    if(ia===-1 && ib===-1) return 0; if(ia===-1) return 1; if(ib===-1) return -1; return ia-ib;
+  });
+  A.upsertChart('chartMidiaIdade', {
+    type:'bar',
+    data:{ labels: byIdade.map(c=>c.key), datasets:[{ label:'Investimento', data: byIdade.map(c=>Number(c.gasto.toFixed(2))), backgroundColor:'#7c4dc4', borderRadius:6, maxBarThickness:44 }] },
+    options: A.baseChartOptions({ indexAxis:'y', plugins:{legend:{display:false}}, scales:{ x:{ beginAtZero:true } } })
+  });
+
+  const byGenero = L.mediaGroupBy(records, r => r.genero);
+  A.upsertChart('chartMidiaGenero', {
+    type:'doughnut',
+    data:{ labels: byGenero.map(g=>A.titleCase(g.key)), datasets:[{ data: byGenero.map(g=>Number(g.gasto.toFixed(2))), backgroundColor:A.PALETTE, borderWidth:2, borderColor:'#fff' }] },
+    options: A.baseChartOptions({ cutout:'62%' })
+  });
+}
+
+/* ============================================================
    SECTION 7 — COMPARATIVOS
    ============================================================ */
 function renderComparativos(subs){
@@ -2513,6 +2939,7 @@ window.__renderAllSections = function(){
   renderFamilia(subs);
   renderCancelamento(subs);
   renderMetas();
+  renderMidia();
   renderComparativos(subs);
 };
 })();
